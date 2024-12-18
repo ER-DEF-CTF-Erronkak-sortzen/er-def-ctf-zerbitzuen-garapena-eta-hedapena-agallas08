@@ -5,10 +5,18 @@ services:
             context: ./web
             dockerfile: Dockerfile
         ports:
-            - "9797:80"
+            - "80:80"
     ssh:
         build:
             context: ./ssh
             dockerfile: Dockerfile
         ports:
             - "8822:22"
+    ftp:
+        restart: unless-stopped
+        build:
+            context: ./ftp
+            dockerfile: Dockerfile
+        ports:
+           - "20:20"
+           - "21:21"
