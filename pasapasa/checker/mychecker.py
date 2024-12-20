@@ -6,7 +6,16 @@ import http.client
 import socket
 import paramiko
 import hashlib
-PORT_WEB = 9797
+from ftplib import FTP
+from ftplib import error_perm, error_temp, error_reply
+PORT_WEB = 80
+PATH_WEB= '/usr/local/apache2/htdocs/index.html'
+PORT_FTP = 21
+USER_FTP = 'odin'
+PASS_FTP = 'e5f6g7h8'
+PATH_CHROOT = '/etc/vsftpd.chroot_list'
+PATH_USERLIST = '/home/test/.userlist'
+PATH_SSHUSERS = '/tmp/.ssh_users'
 PORT_SSH = 8822
 def ssh_connect():
     def decorator(func):
@@ -46,7 +55,43 @@ class MyChecker(checkerlib.BaseChecker):
         return checkerlib.CheckResult.OK
 
     def check_service(self):
-        # check if ports are open
+        #Check if web server port is openned.
+        if not self._check_port_web(self.ip, PORT_WEB):
+            return checkerlib.CheckerResult.FAULTY
+        
+        #Check if index.html from the web server docker has been changed.
+        if not self._check_web_integrity(PATH_WEB):
+            return checkerlib.CheckerResult.FAULTY
+        
+        #Check if HTTP server is Apache 2.4.50
+        if not self._check_apache_version():
+            return checkerlib.CheckResult.FAULTY
+        
+        #Check if vsftpd.chroot_list file from the FTP server has been changed.
+        if not self._check_ftp_fileintegrity(PATH_CHROOT, 'chroot'):
+            return checkerlib.CheckResult.FAULTY
+        
+        #Check if .userlist file from the FTP server has been changed.
+        if not self._check_ftp_fileintegrity(PATH_USERLIST, 'users'):
+            return checkerlib.CheckResult.FAULTY
+        
+        #Check if .ssh_users file from the FTP server has been changed.
+        if not self._check_ftp_fileintegrity(PATH_SSHUSERS, 'ssh'):
+            return checkerlib.CheckResult.FAULTY
+        
+        #Check if FTP server is up and odin user can connect to it.
+        if not self._check_ftp(self.ip, PORT_FTP, USER_FTP, PASS_FTP):
+            return checkerlib.CheckResult.FAULTY
+        
+        #Check if index.html is accessible.
+        if not self._check_web(self.ip, PORT_WEB, 200):
+            return checkerlib.CheckResult.FAULTY
+        
+        if not self._check_port_ssh(self.ip, PORT_SSH):
+            return checkerlib.CheckResult.FAULTY
+        
+        '''
+        # check if ports are open. No procede, hacerlo de otra manera para comprobar FTPr
         if not self._check_port_web(self.ip, PORT_WEB) or not self._check_port_ssh(self.ip, PORT_SSH):
             return checkerlib.CheckResult.DOWN
         #else
@@ -63,7 +108,8 @@ class MyChecker(checkerlib.BaseChecker):
         file_path_ssh = '/etc/ssh/sshd_config'
         # check if /etc/sshd_config from pasapasa_ssh has been changed by comparing its hash with the hash of the original file
         if not self._check_ssh_integrity(file_path_ssh):
-            return checkerlib.CheckResult.FAULTY            
+            return checkerlib.CheckResult.FAULTY 
+        '''           
         return checkerlib.CheckResult.OK
     
     def check_flag(self, tick):
@@ -78,7 +124,7 @@ class MyChecker(checkerlib.BaseChecker):
         if not flag_present:
             return checkerlib.CheckResult.FLAG_NOT_FOUND
         return checkerlib.CheckResult.OK
-        
+    '''     
     @ssh_connect()
     #Function to check if an user exists
     def _check_ssh_user(self, username):
@@ -88,7 +134,7 @@ class MyChecker(checkerlib.BaseChecker):
         if stderr.channel.recv_exit_status() != 0:
             return False
         return True
-      
+     
     @ssh_connect()
     def _check_web_integrity(self, path):
         ssh_session = self.client
@@ -111,7 +157,7 @@ class MyChecker(checkerlib.BaseChecker):
         print (hashlib.md5(output.encode()).hexdigest())
 
         return hashlib.md5(output.encode()).hexdigest() == 'ba55c65e08e320f1225c76f810f1328b'
-  
+    '''
     # Private Funcs - Return False if error
     def _add_new_flag(self, ssh_session, flag):
         # Execute the file creation command in the container
@@ -149,6 +195,69 @@ class MyChecker(checkerlib.BaseChecker):
             if conn:
                 conn.close()
 
+    @ssh_connect()
+    def _check_web_integrity(self, path):
+        ssh_session = self.client
+        command = f"docker exec pasapasa_web_1 sh -c 'cat {path}'"
+        stdin, stdout, stderr = ssh_session.exec_command(command)
+        if stderr.channel.recv_exit_status() != 0:
+            return False
+        output = stdout.read().decode().strip()
+        return hashlib.md5(output.encode()).hexdigest() == '76b2bcd96e5e0f2b6b66b9df893dd06b'
+    
+    @ssh_connect()
+    def _check_apache_version(self):
+        ssh_session = self.client
+        command = f"docker exec pasapasa_web_1 sh -c 'httpd -v | grep \"Apache/2.4.50\'"
+        stdin, stdout, stderr = ssh_session.exec_command(command)
+
+        if stdout:
+            return True
+        else:
+            return False
+
+    @ssh_connect()    
+    def _check_ftp_fileintegrity(self, path, file):
+        ssh_session = self.client
+        command = f"docker exec pasapasa_ftp_1 sh -c 'cat {path}'"
+        stdin, stdout, stderr = ssh_session.exec_command(command)
+        if stderr.channel.recv_exit_status() != 0:
+            return False
+        output = stdout.read().decode().strip()
+        if file == 'chroot':
+            return hashlib.md5(output.encode()).hexdigest() == 'e44985980c9d3c5d70b6a548b14d773a'
+        elif file == 'users':
+            return hashlib.md5(output.encode()).hexdigest() == 'dea9c2e86d7285c6393ace1d36edc8c4'
+        elif file == 'ssh':
+            return hashlib.md5(output.encode()).hexdigest() == 'e64cfa3fd59e32df57003c7401f48c99'
+    
+    def _check_ftp(self, ip, port, user, passwd):
+        try:
+            ftpconn = FTP()
+            ftpconn.connect(ip, port)
+            ftpconn.login(user, passwd)           
+            ftpconn.quit()
+            return True
+        except (error_perm, error_temp, error_reply) as e:
+            print(f"Exception: {e}")
+            return False
+
+    def _check_ssh():
+        return True
+    
+    def _check_web(self, ip, port, status):
+        try:
+            conn = http.client.HTTPConnection(ip, port, timeout=5)
+            conn.request("GET", "/")
+            response = conn.getresponse()          
+            return response.status == status
+        except (http.client.HTTPException, socket.error) as e:
+            print(f"Exception: {e}")
+            return False
+        finally:
+            if conn:
+                conn.close()
+
     def _check_port_ssh(self, ip, port):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -160,17 +269,6 @@ class MyChecker(checkerlib.BaseChecker):
             return False
         finally:
             sock.close()
-
-    @ssh_connect()
-    def _check_apache_version(self):
-        ssh_session = self.client
-        command = f"docker exec pasapasa_web_1 sh -c 'httpd -v | grep \"Apache/2.4.50\'"
-        stdin, stdout, stderr = ssh_session.exec_command(command)
-
-        if stdout:
-            return True
-        else:
-            return False
   
 if __name__ == '__main__':
     checkerlib.run_check(MyChecker)
